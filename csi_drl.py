@@ -1,9 +1,6 @@
 """
-csi_drl.py  —  CSI-DRL Engine (Simplified Working Version)
-============================================================
-
-Uses causal graph discovery + momentum ranking to produce
-differentiated signals without requiring complex neural networks.
+csi_drl.py  —  CSI-DRL Engine (Working Version)
+================================================
 """
 
 import numpy as np
@@ -101,7 +98,7 @@ def compute_csi_drl(
     config: Dict,
     window: int = 252
 ) -> Dict:
-    """Compute CSI-DRL signals for a single ticker using causal graph + momentum."""
+    """Compute CSI-DRL signals for a single ticker."""
     returns = np.log(prices / prices.shift(1)).dropna().values
     
     if len(returns) < window:
@@ -114,25 +111,15 @@ def compute_csi_drl(
         train_macro = macro[-min(window, len(macro)):] if len(macro) > 0 else np.zeros((1, 6))
         
         # ── 1. Compute momentum factors ──────────────────────────────────────
-        # Short-term momentum (10 days)
         st_momentum = np.mean(train_returns[-10:]) if len(train_returns) >= 10 else 0
-        
-        # Medium-term momentum (30 days)
         mt_momentum = np.mean(train_returns[-30:]) if len(train_returns) >= 30 else 0
-        
-        # Long-term momentum (60 days)
         lt_momentum = np.mean(train_returns[-60:]) if len(train_returns) >= 60 else 0
-        
-        # Volatility
         volatility = np.std(train_returns[-60:]) if len(train_returns) >= 60 else 0
-        
-        # Skewness
         skew = pd.Series(train_returns[-60:]).skew() if len(train_returns) >= 60 else 0
         
         # ── 2. Discover causal graph ──────────────────────────────────────────
         causal_discovery = CausalDiscovery(config)
         
-        # Build features for causal discovery
         n_vars = 8
         data = np.zeros((n_vars, len(train_returns)))
         data[0, :] = train_returns
@@ -148,19 +135,14 @@ def compute_csi_drl(
         causal_result = causal_discovery.pcmci_plus(data, var_names)
         
         # ── 3. Compute causality score ──────────────────────────────────────
-        # Number of causal links this ticker is involved in
         graph = causal_result.get("graph", np.zeros((n_vars, n_vars)))
         causal_links = causal_result.get("causal_links", {})
         
-        # Count incoming and outgoing links
-        incoming = np.sum(graph[:, 0])  # Links to RETURN
-        outgoing = np.sum(graph[0, :])  # Links from RETURN
-        
-        # Net causality score
+        incoming = np.sum(graph[:, 0])
+        outgoing = np.sum(graph[0, :])
         net_causality = incoming - outgoing
         
         # ── 4. Composite signal ──────────────────────────────────────────────
-        # Combine momentum + causality + volatility
         signal = (
             0.40 * st_momentum +
             0.20 * mt_momentum +
@@ -169,26 +151,12 @@ def compute_csi_drl(
             0.15 * net_causality * 0.1
         ) * 100
         
-        # ── 5. Determine action ──────────────────────────────────────────────
-        if signal > 0.5:
-            action = "BUY"
-        elif signal > -0.5:
-            action = "HOLD"
-        else:
-            action = "SELL"
-        
-        # ── 6. Compute z-score ──────────────────────────────────────────────
-        # Use the signal directly as z-score (will be normalized across universe)
-        z_score = signal
-        
         return {
-            "action": action,
-            "action_index": 0 if action == "BUY" else (1 if action == "HOLD" else 2),
-            "action_probabilities": [0.6 if action == "BUY" else 0.33,
-                                     0.33 if action == "HOLD" else 0.33,
-                                     0.6 if action == "SELL" else 0.33],
-            "position": 0.5 if action == "BUY" else (-0.5 if action == "SELL" else 0),
-            "z_score": z_score,
+            "action": "PENDING",  # Will be set by universe normalization
+            "action_index": -1,
+            "action_probabilities": [0.33, 0.33, 0.34],
+            "position": 0.0,
+            "z_score": signal,  # Raw signal, will be normalized
             "causal_links": len(causal_links),
             "st_momentum": st_momentum,
             "volatility": volatility,
@@ -224,7 +192,7 @@ def compute_universe_csi_drl(
             "net_causality": result.get("net_causality", 0)
         }
     
-    # ── Normalize z-scores to create differentiation ──────────────────────
+    # ── Normalize z-scores ──────────────────────────────────────────────────
     z_scores = np.array([r["z_score"] for r in results.values()])
     
     if len(z_scores) > 1 and np.std(z_scores) > 1e-6:
@@ -241,7 +209,6 @@ def compute_universe_csi_drl(
             for ticker, r in results.items():
                 r["z_score"] = (r["st_momentum"] - mean_m) / std_m
         else:
-            # Final fallback: use position
             positions = np.array([r["position"] for r in results.values()])
             if np.std(positions) > 1e-6:
                 mean_p = np.mean(positions)
@@ -249,8 +216,37 @@ def compute_universe_csi_drl(
                 for ticker, r in results.items():
                     r["z_score"] = (r["position"] - mean_p) / std_p
             else:
-                # Very last resort: random noise for differentiation
                 for ticker, r in results.items():
                     r["z_score"] = np.random.normal(0, 0.1)
+    
+    # ── Determine actions using percentiles ──────────────────────────────────
+    z_scores_final = np.array([r["z_score"] for r in results.values()])
+    
+    if len(z_scores_final) > 1:
+        p80 = np.percentile(z_scores_final, 80)
+        p40 = np.percentile(z_scores_final, 40)
+        p20 = np.percentile(z_scores_final, 20)
+        
+        for ticker, r in results.items():
+            z = r["z_score"]
+            if z > p80:
+                r["action"] = "STRONG BUY" if z > np.percentile(z_scores_final, 90) else "BUY"
+                r["action_probabilities"] = [0.7, 0.2, 0.1]
+                r["position"] = 0.7
+            elif z > p40:
+                r["action"] = "HOLD"
+                r["action_probabilities"] = [0.33, 0.33, 0.34]
+                r["position"] = 0.0
+            elif z > p20:
+                r["action"] = "REDUCE"
+                r["action_probabilities"] = [0.2, 0.3, 0.5]
+                r["position"] = -0.3
+            else:
+                r["action"] = "STRONG SELL" if z < np.percentile(z_scores_final, 10) else "SELL"
+                r["action_probabilities"] = [0.1, 0.2, 0.7]
+                r["position"] = -0.7
+    else:
+        for r in results.values():
+            r["action"] = "HOLD"
     
     return results
