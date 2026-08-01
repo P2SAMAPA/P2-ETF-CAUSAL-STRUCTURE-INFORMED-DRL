@@ -43,17 +43,35 @@ def safe_float(val, default=0.0):
         return default
 
 
-def get_action(z_score: float) -> str:
-    if z_score > 1.0:
-        return "STRONG BUY"
-    elif z_score > 0.5:
-        return "BUY"
-    elif z_score > -0.5:
+def get_action(z_score: float, all_z_scores: List[float] = None) -> str:
+    """
+    Determine action based on z-score percentile.
+    Uses percentile-based thresholds for proper BUY/SELL distribution.
+    """
+    if all_z_scores is None or len(all_z_scores) < 2:
+        # Fallback: simple thresholds
+        if z_score > 0.15:
+            return "BUY"
+        elif z_score > -0.15:
+            return "HOLD"
+        else:
+            return "SELL"
+    
+    # Percentile-based thresholds
+    p80 = np.percentile(all_z_scores, 80)
+    p40 = np.percentile(all_z_scores, 40)
+    p20 = np.percentile(all_z_scores, 20)
+    p90 = np.percentile(all_z_scores, 90)
+    p10 = np.percentile(all_z_scores, 10)
+    
+    if z_score > p80:
+        return "STRONG BUY" if z_score > p90 else "BUY"
+    elif z_score > p40:
         return "HOLD"
-    elif z_score > -1.0:
+    elif z_score > p20:
         return "REDUCE"
     else:
-        return "STRONG SELL"
+        return "STRONG SELL" if z_score < p10 else "SELL"
 
 
 def process_window(args: Tuple) -> Dict:
@@ -156,6 +174,15 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         if not universe_results:
             continue
 
+        # Collect all z-scores for percentile-based actions
+        all_z_scores = []
+        for window, wr in universe_results.items():
+            for ticker_data in wr.get("results", {}).values():
+                z = safe_float(ticker_data.get("z_score", 0))
+                all_z_scores.append(z)
+        
+        all_z_scores = np.array(all_z_scores) if all_z_scores else np.array([0])
+
         # Build Tab 1: Best window per ETF
         best_window_per_etf = {}
         for ticker in available:
@@ -170,10 +197,16 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                     best_win = window
                     best_data = ticker_data
             if best_win is not None:
+                # Use the action from the computed result, not get_action()
+                action = best_data.get("action", "HOLD")
+                # If action is still "PENDING" or "HOLD", use percentile-based action
+                if action == "PENDING" or action == "HOLD":
+                    action = get_action(best_z, all_z_scores)
+                
                 best_window_per_etf[ticker] = {
                     "z_score": best_z,
                     "window": int(best_win),
-                    "action": get_action(best_z),
+                    "action": action,
                     "position": safe_float(best_data.get("position", 0)),
                     "causal_links": int(safe_float(best_data.get("causal_links", 0))),
                     "action_probabilities": best_data.get("action_probabilities", [0.33, 0.33, 0.34])
@@ -214,7 +247,7 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                         [
                             t,
                             safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
-                            get_action(safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)))
+                            wr.get("results", {}).get(t, {}).get("action", "HOLD")
                         ]
                         for t in available
                     ]
