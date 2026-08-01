@@ -175,13 +175,13 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
             continue
 
         # Collect all z-scores for percentile-based actions
-        all_z_scores = []
+        all_z_scores_global = []
         for window, wr in universe_results.items():
             for ticker_data in wr.get("results", {}).values():
                 z = safe_float(ticker_data.get("z_score", 0))
-                all_z_scores.append(z)
+                all_z_scores_global.append(z)
         
-        all_z_scores = np.array(all_z_scores) if all_z_scores else np.array([0])
+        all_z_scores_global = np.array(all_z_scores_global) if all_z_scores_global else np.array([0])
 
         # ── Build Tab 1: Best window per ETF ──────────────────────────────────
         best_window_per_etf = {}
@@ -199,9 +199,8 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
             if best_win is not None:
                 # Use the action from the computed result
                 action = best_data.get("action", "HOLD")
-                # If action is still "PENDING" or "HOLD", use percentile-based action
                 if action == "PENDING" or action == "HOLD":
-                    action = get_action(best_z, all_z_scores)
+                    action = get_action(best_z, all_z_scores_global.tolist())
                 
                 best_window_per_etf[ticker] = {
                     "z_score": best_z,
@@ -232,9 +231,6 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         }
 
         # ── Tab 2: Per-window breakdown ───────────────────────────────────────
-        # Build a lookup from ticker to action from Tab 1
-        ticker_action_lookup = {t: d["action"] for t, d in best_window_per_etf.items()}
-        
         results_tab2["universes"][universe_name] = {
             "windows": {
                 window: {
@@ -244,17 +240,17 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                             [(t, safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)))
                              for t in available],
                             key=lambda x: x[1], reverse=True
-                        )[:5] if z != 0
+                        )[:5]
                     ],
                     "full_ranking": [
                         [
                             t,
                             safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
-                            # Use action from Tab 1 lookup, or compute if missing
-                            ticker_action_lookup.get(t, get_action(
+                            # FIX: Compute action for each window individually using that window's z-scores
+                            get_action(
                                 safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
-                                all_z_scores
-                            ))
+                                [safe_float(wr.get("results", {}).get(x, {}).get("z_score", 0)) for x in available]
+                            )
                         ]
                         for t in available
                     ]
