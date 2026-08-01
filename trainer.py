@@ -197,7 +197,6 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                     best_win = window
                     best_data = ticker_data
             if best_win is not None:
-                # Use the action from the computed result
                 action = best_data.get("action", "HOLD")
                 if action == "PENDING" or action == "HOLD":
                     action = get_action(best_z, all_z_scores_global.tolist())
@@ -214,11 +213,13 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         if not best_window_per_etf:
             continue
 
+        # ── Top 5 buys (highest z-scores) ──────────────────────────────────────
         top_buys = sorted(
             [(t, d["z_score"]) for t, d in best_window_per_etf.items()],
             key=lambda x: x[1], reverse=True
         )[:5]
 
+        # ── Top 5 sells (lowest z-scores) ──────────────────────────────────────
         top_sells = sorted(
             [(t, d["z_score"]) for t, d in best_window_per_etf.items()],
             key=lambda x: x[1]
@@ -246,7 +247,6 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                         [
                             t,
                             safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
-                            # FIX: Compute action for each window individually using that window's z-scores
                             get_action(
                                 safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
                                 [safe_float(wr.get("results", {}).get(x, {}).get("z_score", 0)) for x in available]
