@@ -183,7 +183,7 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         
         all_z_scores = np.array(all_z_scores) if all_z_scores else np.array([0])
 
-        # Build Tab 1: Best window per ETF
+        # ── Build Tab 1: Best window per ETF ──────────────────────────────────
         best_window_per_etf = {}
         for ticker in available:
             best_z = -999
@@ -197,7 +197,7 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                     best_win = window
                     best_data = ticker_data
             if best_win is not None:
-                # Use the action from the computed result, not get_action()
+                # Use the action from the computed result
                 action = best_data.get("action", "HOLD")
                 # If action is still "PENDING" or "HOLD", use percentile-based action
                 if action == "PENDING" or action == "HOLD":
@@ -232,6 +232,9 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
         }
 
         # ── Tab 2: Per-window breakdown ───────────────────────────────────────
+        # Build a lookup from ticker to action from Tab 1
+        ticker_action_lookup = {t: d["action"] for t, d in best_window_per_etf.items()}
+        
         results_tab2["universes"][universe_name] = {
             "windows": {
                 window: {
@@ -247,7 +250,11 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
                         [
                             t,
                             safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
-                            wr.get("results", {}).get(t, {}).get("action", "HOLD")
+                            # Use action from Tab 1 lookup, or compute if missing
+                            ticker_action_lookup.get(t, get_action(
+                                safe_float(wr.get("results", {}).get(t, {}).get("z_score", 0)),
+                                all_z_scores
+                            ))
                         ]
                         for t in available
                     ]
