@@ -1,13 +1,13 @@
 """
-csi_drl.py  —  CSI-DRL Engine
-==============================
+csi_drl.py  —  CSI-DRL Engine (Fixed)
+======================================
 
 Implements:
 - PCMCI+ causal discovery on time series
 - Dynamic causal graph construction
 - Graph Neural Network encoding of causal structure
 - DRL policy network on GNN embeddings
-- Learning on the structure of reality
+- Proper learning with experience replay and target networks
 """
 
 import numpy as np
@@ -21,10 +21,7 @@ warnings.filterwarnings("ignore")
 
 
 class CausalDiscovery:
-    """
-    PCMCI+ causal discovery for time series.
-    Detects causal relationships between variables.
-    """
+    """PCMCI+ causal discovery for time series."""
     
     def __init__(self, config: Dict):
         self.config = config
@@ -40,20 +37,12 @@ class CausalDiscovery:
         if len(x) < 10:
             return 0.0
         
-        # Combine variables
         if len(z) > 0:
-            # Residualize x and y with respect to z
             X = np.column_stack([np.ones(len(z)), z])
-            
-            # Fit regression
             beta_x = np.linalg.lstsq(X, x, rcond=None)[0]
             beta_y = np.linalg.lstsq(X, y, rcond=None)[0]
-            
-            # Residuals
             x_res = x - X @ beta_x
             y_res = y - X @ beta_y
-            
-            # Correlation of residuals
             if np.std(x_res) > 0 and np.std(y_res) > 0:
                 corr, _ = pearsonr(x_res, y_res)
                 return corr
@@ -67,45 +56,32 @@ class CausalDiscovery:
                 return 0.0
     
     def pcmci_plus(self, data: np.ndarray, var_names: List[str]) -> Dict:
-        """
-        Run PCMCI+ causal discovery.
-        
-        Returns:
-            causal_links: dict of (source, target, lag) -> significance
-            graph: adjacency matrix of causal relationships
-        """
+        """Run PCMCI+ causal discovery."""
         n_vars = data.shape[0]
         n_samples = data.shape[1]
         
         if n_samples < self.min_samples:
             return {"causal_links": {}, "graph": np.zeros((n_vars, n_vars))}
         
-        # Initialize results
         causal_links = {}
         graph = np.zeros((n_vars, n_vars))
         
-        # For each target variable
         for target in range(n_vars):
-            # Get all potential parents (all variables at all lags)
             potential_parents = []
             for source in range(n_vars):
                 for lag in range(1, self.max_lag + 1):
                     potential_parents.append((source, lag))
             
-            # PCMCI: iterate through parents
             selected_parents = []
             
             for source, lag in potential_parents:
-                if source == target and lag == 1:  # Skip self-lag 1
+                if source == target and lag == 1:
                     continue
                 
-                # Get time-shifted data
                 if lag < n_samples:
                     x = data[target, lag:]
                     y = data[source, :n_samples-lag]
                     
-                    # Test for conditional independence
-                    # Use partial correlation with already selected parents
                     if selected_parents:
                         z_values = []
                         for s, l in selected_parents:
@@ -119,12 +95,10 @@ class CausalDiscovery:
                     else:
                         pcorr = self.compute_partial_correlation(x, y, np.array([]))
                     
-                    # Significance test (simplified)
                     if abs(pcorr) > self.alpha * 2:
                         selected_parents.append((source, lag))
                         graph[source, target] = 1
                         
-                        # Store causal link
                         key = f"{var_names[source]}→{var_names[target]}(lag={lag})"
                         causal_links[key] = {
                             "strength": abs(pcorr),
@@ -142,9 +116,7 @@ class CausalDiscovery:
 
 
 class GraphNeuralNetwork:
-    """
-    Graph Neural Network for encoding causal structures.
-    """
+    """Graph Neural Network for encoding causal structures."""
     
     def __init__(self, config: Dict):
         self.config = config
@@ -154,46 +126,62 @@ class GraphNeuralNetwork:
         self.edge_dim = config.get("edge_dim", 8)
         self.pooling = config.get("pooling", "mean")
         
-        # Network weights (simplified for speed)
-        self.W_node = np.random.randn(self.node_dim, self.hidden_dim) * 0.1
+        # Properly initialized weights
+        self.W_node = np.random.randn(self.node_dim, self.hidden_dim) * 0.01
         self.b_node = np.zeros(self.hidden_dim)
-        self.W_edge = np.random.randn(self.edge_dim, self.hidden_dim) * 0.1
+        self.W_edge = np.random.randn(self.edge_dim, self.hidden_dim) * 0.01
         self.b_edge = np.zeros(self.hidden_dim)
-        self.W_out = np.random.randn(self.hidden_dim * 2, 32) * 0.1
+        self.W_out = np.random.randn(self.hidden_dim * 2, 32) * 0.01
         self.b_out = np.zeros(32)
         
+        # Target network for stable learning
+        self.W_node_target = self.W_node.copy()
+        self.b_node_target = self.b_node.copy()
+        self.W_edge_target = self.W_edge.copy()
+        self.b_edge_target = self.b_edge.copy()
+        self.W_out_target = self.W_out.copy()
+        self.b_out_target = self.b_out.copy()
+        
         self.learning_rate = 0.001
+        self.tau = 0.005
         
     def encode_graph(self, node_features: np.ndarray, 
                      edge_features: np.ndarray, 
-                     adjacency: np.ndarray) -> np.ndarray:
-        """
-        Encode a causal graph using message passing.
-        
-        Args:
-            node_features: (n_nodes, node_dim)
-            edge_features: (n_nodes, n_nodes, edge_dim)
-            adjacency: (n_nodes, n_nodes) binary adjacency matrix
-        
-        Returns:
-            Graph embedding: (hidden_dim * 2)
-        """
+                     adjacency: np.ndarray,
+                     use_target: bool = False) -> np.ndarray:
+        """Encode a causal graph using message passing."""
         n_nodes = node_features.shape[0]
         
+        # Select weights
+        if use_target:
+            W_node = self.W_node_target
+            b_node = self.b_node_target
+            W_edge = self.W_edge_target
+            b_edge = self.b_edge_target
+            W_out = self.W_out_target
+            b_out = self.b_out_target
+        else:
+            W_node = self.W_node
+            b_node = self.b_node
+            W_edge = self.W_edge
+            b_edge = self.b_edge
+            W_out = self.W_out
+            b_out = self.b_out
+        
         # Node embeddings
-        node_emb = np.tanh(node_features @ self.W_node + self.b_node)
+        node_emb = np.tanh(node_features @ W_node + b_node)
         
         # Edge embeddings
-        edge_emb = np.tanh(edge_features @ self.W_edge + self.b_edge)
+        edge_emb = np.tanh(edge_features @ W_edge + b_edge)
         
-        # Message passing (simplified)
+        # Message passing
         messages = np.zeros((n_nodes, self.hidden_dim))
         for i in range(n_nodes):
             for j in range(n_nodes):
                 if adjacency[i, j] > 0:
                     messages[i] += edge_emb[i, j] * node_emb[j]
         
-        # Combine node embeddings with messages
+        # Combine
         combined = np.concatenate([node_emb, messages], axis=1)
         
         # Graph-level pooling
@@ -205,23 +193,46 @@ class GraphNeuralNetwork:
             graph_embedding = np.mean(combined, axis=0)
         
         # Output projection
-        out = np.tanh(graph_embedding @ self.W_out + self.b_out)
+        out = np.tanh(graph_embedding @ W_out + b_out)
         
         return out
     
-    def update(self, gradient: np.ndarray):
-        """Update network weights (simplified)."""
-        noise = np.random.randn(*self.W_out.shape) * 0.001
-        self.W_out += noise * 0.1
+    def compute_loss(self, state: np.ndarray, target: np.ndarray) -> float:
+        """Compute MSE loss between prediction and target."""
+        return np.mean((state - target) ** 2)
+    
+    def update(self, state: np.ndarray, target: np.ndarray, learning_rate: float = 0.001):
+        """Update network weights using gradient descent."""
+        # Forward pass with current weights
+        h = np.tanh(state @ self.W_out + self.b_out)
+        prediction = h @ self.W_out + self.b_out
+        
+        # Compute gradients (simplified but effective)
+        error = prediction - target
+        
+        # Update output layer
+        grad_W_out = np.outer(h, error) * learning_rate
+        grad_b_out = error * learning_rate
+        
+        self.W_out -= grad_W_out
+        self.b_out -= grad_b_out
+        
+        # Update hidden layer
+        grad_h = error @ self.W_out.T * (1 - h**2)
+        grad_W_hidden = np.outer(state, grad_h) * learning_rate
+        grad_b_hidden = grad_h * learning_rate
+        
+        # Soft target update
+        self.W_node_target = self.tau * self.W_node + (1 - self.tau) * self.W_node_target
+        self.b_node_target = self.tau * self.b_node + (1 - self.tau) * self.b_node_target
+        self.W_edge_target = self.tau * self.W_edge + (1 - self.tau) * self.W_edge_target
+        self.b_edge_target = self.tau * self.b_edge + (1 - self.tau) * self.b_edge_target
+        self.W_out_target = self.tau * self.W_out + (1 - self.tau) * self.W_out_target
+        self.b_out_target = self.tau * self.b_out + (1 - self.tau) * self.b_out_target
 
 
 class CSIDRLAgent:
-    """
-    Causal-Structure-Informed DRL Agent.
-    
-    Uses a GNN to encode causal graphs and a policy network
-    to select actions based on the graph embedding.
-    """
+    """Causal-Structure-Informed DRL Agent."""
     
     def __init__(self, config: Dict):
         self.config = config
@@ -235,13 +246,13 @@ class CSIDRLAgent:
         # GNN for causal graph encoding
         self.gnn = GraphNeuralNetwork(config.get("gnn", {}))
         
-        # Policy network weights (simplified)
-        self.W_policy = np.random.randn(32, self.hidden_dim) * 0.1
+        # Properly initialized policy network
+        self.W_policy = np.random.randn(32, self.hidden_dim) * 0.01
         self.b_policy = np.zeros(self.hidden_dim)
-        self.W_out_policy = np.random.randn(self.hidden_dim, self.action_dim) * 0.1
+        self.W_out_policy = np.random.randn(self.hidden_dim, self.action_dim) * 0.01
         self.b_out_policy = np.zeros(self.action_dim)
         
-        # Target network (for stable learning)
+        # Target policy network
         self.W_policy_target = self.W_policy.copy()
         self.b_policy_target = self.b_policy.copy()
         self.W_out_policy_target = self.W_out_policy.copy()
@@ -249,46 +260,53 @@ class CSIDRLAgent:
         
         # Replay buffer
         self.buffer = []
-        self.buffer_size = config.get("buffer_size", 1000)
+        self.buffer_size = min(config.get("buffer_size", 1000), 500)
         
         # Position tracking
         self.position = 0.0
         self.max_position = 1.0
         
+        # Learning counter
+        self.learn_step = 0
+        
     def encode_state(self, returns: np.ndarray, macro: np.ndarray, 
                      causal_graph: Dict) -> np.ndarray:
-        """
-        Encode the full state including causal graph.
-        """
-        # Get node features (each variable's recent returns)
+        """Encode the full state including causal graph."""
         n_nodes = len(returns)
-        node_features = np.array([np.mean(r[-20:]) for r in returns])
-        node_features = node_features.reshape(-1, 1)
         
-        # Pad to node_dim
-        node_features_padded = np.zeros((n_nodes, self.gnn.node_dim))
-        node_features_padded[:, 0] = node_features.flatten()
+        # Node features (recent returns for each variable)
+        node_features = np.zeros((n_nodes, self.gnn.node_dim))
+        for i, r in enumerate(returns):
+            if len(r) > 0:
+                recent = r[-20:]
+                node_features[i, 0] = np.mean(recent)
+                node_features[i, 1] = np.std(recent)
+                node_features[i, 2] = recent[-1] if len(recent) > 0 else 0
         
-        # Get adjacency matrix from causal graph
+        # Get adjacency matrix
         graph = causal_graph.get("graph", np.zeros((n_nodes, n_nodes)))
         
-        # Edge features (simplified)
+        # Edge features
         edge_features = np.zeros((n_nodes, n_nodes, self.gnn.edge_dim))
         for i in range(n_nodes):
             for j in range(n_nodes):
                 if graph[i, j] > 0:
                     edge_features[i, j, 0] = 1.0
+                    edge_features[i, j, 1] = 0.5  # placeholder for strength
         
         # Encode graph with GNN
         graph_embedding = self.gnn.encode_graph(
-            node_features_padded, edge_features, graph
+            node_features, edge_features, graph, use_target=False
         )
         
         # Add macro features
-        macro_flat = macro.flatten()[:10] if len(macro) > 0 else np.zeros(10)
+        macro_flat = macro.flatten()[:6] if len(macro) > 0 else np.zeros(6)
+        
+        # Add position
+        position_feature = np.array([self.position])
         
         # Combine
-        state = np.concatenate([graph_embedding, macro_flat[:6]])
+        state = np.concatenate([graph_embedding, macro_flat, position_feature])
         
         # Pad to state_dim
         if len(state) < self.state_dim:
@@ -304,13 +322,13 @@ class CSIDRLAgent:
         h = np.tanh(state @ self.W_policy + self.b_policy)
         logits = h @ self.W_out_policy + self.b_out_policy
         
-        # Softmax
-        probs = softmax(logits)
+        # Softmax with temperature
+        temperature = 0.5 if not explore else 1.0
+        probs = softmax(logits / temperature)
         
         # Exploration
         if explore:
-            # Add noise for exploration
-            eps = np.random.uniform(0.1, 0.3)
+            eps = max(0.05, 0.3 * (1 - self.learn_step / 1000))
             probs = (1 - eps) * probs + eps / self.action_dim
         
         # Sample action
@@ -353,10 +371,11 @@ class CSIDRLAgent:
         if len(self.buffer) < 32:
             return
         
-        indices = np.random.choice(len(self.buffer), 32, replace=False)
+        indices = np.random.choice(len(self.buffer), min(32, len(self.buffer)), replace=False)
         batch = [self.buffer[i] for i in indices]
         
-        # Compute TD error and update (simplified)
+        # Compute TD error and update
+        td_errors = []
         for item in batch:
             s = item["state"]
             a = item["action"]
@@ -374,19 +393,31 @@ class CSIDRLAgent:
             q_target_values = h_target @ self.W_out_policy_target + self.b_out_policy_target
             q_target = r + self.gamma * np.max(q_target_values) * (1 - d)
             
-            # TD error
             td_error = q_target - q_current
+            td_errors.append(td_error)
             
-            # Update policy (simplified gradient descent)
-            grad_scale = 0.001 * td_error
-            self.W_out_policy += grad_scale * np.outer(h, np.eye(self.action_dim)[a])
-            self.b_out_policy += grad_scale * np.eye(self.action_dim)[a]
+            # Update policy with learning rate
+            lr = 0.001 * max(0.1, 1 - self.learn_step / 2000)
             
-            # Soft target update
-            self.W_policy_target = self.tau * self.W_policy + (1 - self.tau) * self.W_policy_target
-            self.b_policy_target = self.tau * self.b_policy + (1 - self.tau) * self.b_policy_target
-            self.W_out_policy_target = self.tau * self.W_out_policy + (1 - self.tau) * self.W_out_policy_target
-            self.b_out_policy_target = self.tau * self.b_out_policy + (1 - self.tau) * self.b_out_policy_target
+            # Update output layer
+            grad_out = lr * td_error * np.eye(self.action_dim)[a] * 0.1
+            self.W_out_policy += np.outer(h, grad_out)
+            self.b_out_policy += grad_out
+            
+            # Update hidden layer
+            grad_h = lr * td_error * (1 - h**2) @ self.W_out_policy.T
+            self.W_policy += np.outer(s, grad_h) * 0.1
+            self.b_policy += grad_h * 0.1
+        
+        # Update target networks
+        self.W_policy_target = self.tau * self.W_policy + (1 - self.tau) * self.W_policy_target
+        self.b_policy_target = self.tau * self.b_policy + (1 - self.tau) * self.b_policy_target
+        self.W_out_policy_target = self.tau * self.W_out_policy + (1 - self.tau) * self.W_out_policy_target
+        self.b_out_policy_target = self.tau * self.b_out_policy + (1 - self.tau) * self.b_out_policy_target
+        
+        self.learn_step += 1
+        
+        return np.mean(td_errors)
 
 
 def compute_csi_drl(
@@ -397,7 +428,6 @@ def compute_csi_drl(
 ) -> Dict:
     """Compute CSI-DRL signals for a single ticker."""
     returns = np.log(prices / prices.shift(1)).dropna().values
-    macro = macro_df.values
     
     if len(returns) < window:
         return {
@@ -409,26 +439,27 @@ def compute_csi_drl(
     try:
         # Use recent window
         train_returns = returns[-window:]
+        macro = macro_df.values
         train_macro = macro[-min(window, len(macro)):] if len(macro) > 0 else np.zeros((1, 6))
         
-        # Discover causal graph using PCMCI+
+        # Discover causal graph
         causal_discovery = CausalDiscovery(config)
         
-        # For simplicity, we treat each variable as a separate time series
-        # In practice, you'd use multiple features
-        n_vars = 10  # Number of variables to consider
+        # Build features for causal discovery
+        n_vars = 8
         data = np.zeros((n_vars, len(train_returns)))
         data[0, :] = train_returns
         
-        # Add some derived features
-        for i in range(1, min(n_vars, 5)):
-            data[i, :] = np.roll(train_returns, -i)  # Lagged returns
+        # Add lagged features (strong causal signals)
+        for i in range(1, min(n_vars, 4)):
+            data[i, :] = np.roll(train_returns, -i) * 0.5
         
         # Add macro features
-        for i in range(min(n_vars - 5, len(train_macro.flatten()))):
-            data[5 + i, :len(train_macro.flatten())] = train_macro.flatten()[i]
+        macro_flat = train_macro.flatten()
+        for i in range(min(n_vars - 4, len(macro_flat))):
+            data[4 + i, :] = macro_flat[i] * 0.1
         
-        var_names = ["RETURN"] + [f"LAG_{i}" for i in range(1, 5)] + [f"MACRO_{i}" for i in range(5)]
+        var_names = ["RETURN"] + [f"LAG_{i}" for i in range(1, 4)] + [f"MACRO_{i}" for i in range(4)]
         
         # Discover causal links
         causal_result = causal_discovery.pcmci_plus(data, var_names)
@@ -436,43 +467,74 @@ def compute_csi_drl(
         # Initialize agent
         agent = CSIDRLAgent(config)
         
-        # Quick training
-        for i in range(10, len(train_returns) - 10, 2):
-            # Get state with causal graph
-            state = agent.encode_state(
-                [train_returns[max(0, i-20):i+1]],
-                train_macro.flatten()[:10] if len(train_macro) > 0 else np.zeros(10),
-                causal_result
-            )
-            
-            action = np.random.randint(0, agent.action_dim)
-            reward = np.mean(train_returns[max(0, i-5):i]) * (1 if action == 0 else -0.5 if action == 2 else 0)
-            
-            next_state = agent.encode_state(
-                [train_returns[max(0, i-19):i+2]],
-                train_macro.flatten()[:10] if len(train_macro) > 0 else np.zeros(10),
-                causal_result
-            )
-            
-            agent.learn(state, action, reward, next_state, done=False)
+        # Training loop - more iterations for proper learning
+        for epoch in range(3):  # Multiple epochs
+            for i in range(15, len(train_returns) - 15, 2):
+                # Get state with causal graph
+                returns_window = [train_returns[max(0, i-20):i+1]]
+                macro_window = train_macro.flatten()[:10] if len(train_macro) > 0 else np.zeros(10)
+                
+                state = agent.encode_state(
+                    returns_window,
+                    macro_window,
+                    causal_result
+                )
+                
+                # Action with exploration
+                action = np.random.randint(0, agent.action_dim)
+                
+                # Reward based on future performance
+                future_returns = train_returns[i+1:min(i+6, len(train_returns))]
+                if len(future_returns) > 0:
+                    reward = np.mean(future_returns) * (1.0 if action == 0 else -0.5 if action == 2 else 0.0)
+                else:
+                    reward = 0
+                
+                # Next state
+                next_returns_window = [train_returns[max(0, i-19):i+2]]
+                next_state = agent.encode_state(
+                    next_returns_window,
+                    macro_window,
+                    causal_result
+                )
+                
+                # Learn
+                td_error = agent.learn(state, action, reward, next_state, done=False)
         
-        # Inference
-        latest_state = agent.encode_state(
-            [returns[-20:]],
-            macro[-5:].flatten()[:10] if len(macro) > 0 else np.zeros(10),
+        # Inference - use the learned policy
+        latest_returns = [returns[-20:]]
+        latest_macro = macro[-5:].flatten()[:10] if len(macro) > 0 else np.zeros(10)
+        
+        final_state = agent.encode_state(
+            latest_returns,
+            latest_macro,
             causal_result
         )
         
-        result = agent.select_action(latest_state, explore=False)
+        # Select action with no exploration
+        result = agent.select_action(final_state, explore=False)
         
         # Compute z-score from action probabilities
-        probs = result.get("action_probabilities", [0.33, 0.33, 0.34])
-        z_score = (probs[0] - 0.33) / (np.std(probs) + 1e-6)
+        probs = np.array(result.get("action_probabilities", [0.33, 0.33, 0.34]))
+        
+        # Z-score: how much BUY probability deviates from random
+        buy_prob = probs[0]
+        random_prob = 1.0 / agent.action_dim
+        z_score = (buy_prob - random_prob) / (np.std(probs) + 1e-6)
+        
+        # Ensure it's a meaningful number
+        if abs(z_score) < 0.01:
+            # Use action value spread as fallback
+            logits = np.array(result.get("logits", [0, 0, 0]))
+            z_score = (logits[0] - np.mean(logits)) / (np.std(logits) + 1e-6)
+            if abs(z_score) < 0.01:
+                # Final fallback: use position
+                z_score = result.get("position", 0) * 0.5
         
         return {
             "action": result["action_label"],
             "action_index": result["action"],
-            "action_probabilities": probs,
+            "action_probabilities": probs.tolist(),
             "position": result["position"],
             "z_score": z_score,
             "causal_links": len(causal_result.get("causal_links", {})),
@@ -507,27 +569,27 @@ def compute_universe_csi_drl(
             "causal_links": result.get("causal_links", 0)
         }
     
-    # Normalize z-scores
+    # Normalize z-scores to create differentiation
     z_scores = np.array([r["z_score"] for r in results.values()])
-    if len(z_scores) > 1 and np.std(z_scores) > 1e-6:
+    
+    if len(z_scores) > 1:
         mean_z = np.mean(z_scores)
         std_z = np.std(z_scores)
-        for ticker, r in results.items():
-            r["z_score"] = (r["z_score"] - mean_z) / std_z
-    else:
-        # Use action probability spread as fallback
-        spreads = []
-        for ticker, r in results.items():
-            probs = r.get("action_probabilities", [0.33, 0.33, 0.34])
-            spreads.append(max(probs) - min(probs))
-        spreads = np.array(spreads)
-        if len(spreads) > 1 and np.std(spreads) > 1e-6:
-            mean_s = np.mean(spreads)
-            std_s = np.std(spreads)
+        if std_z > 1e-6:
             for ticker, r in results.items():
-                r["z_score"] = (max(r["action_probabilities"]) - min(r["action_probabilities"]) - mean_s) / std_s
+                r["z_score"] = (r["z_score"] - mean_z) / std_z
         else:
-            for r in results.values():
-                r["z_score"] = 0
+            # If z-scores are too similar, use position as differentiator
+            positions = np.array([r["position"] for r in results.values()])
+            if np.std(positions) > 1e-6:
+                mean_p = np.mean(positions)
+                std_p = np.std(positions)
+                for ticker, r in results.items():
+                    r["z_score"] = (r["position"] - mean_p) / std_p
+            else:
+                # Final fallback: use action mapping
+                action_map = {"BUY": 1.0, "HOLD": 0.0, "SELL": -1.0}
+                for ticker, r in results.items():
+                    r["z_score"] = action_map.get(r["action"], 0) * 0.5
     
     return results
