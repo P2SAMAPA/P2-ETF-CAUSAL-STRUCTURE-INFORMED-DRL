@@ -146,3 +146,9 @@ export HF_TOKEN=hf_...
 python trainer.py
 
 streamlit run streamlit_app.py
+References
+Runge, J., Nowack, P., Kretschmer, M., Flaxman, S., & Sejdinovic, D. (2019). Detecting and quantifying causal associations in large nonlinear time series datasets. Science Advances.
+
+Granger, C. W. J. (1969). Investigating Causal Relations by Econometric Models and Cross-spectral Methods. Econometrica.
+
+Jansen, M. (2023). Machine Learning for Algorithmic Trading. Packt Publishing.
