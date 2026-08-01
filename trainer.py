@@ -228,4 +228,35 @@ def run_trainer(hf_token: Optional[str] = None) -> Dict:
     # ── Save JSON ─────────────────────────────────────────────────────────────
     logger.info("\n💾 Saving JSON results...")
     tab1_path = f"csi_drl_{run_date}.json"
-    tab2_path = f"
+    tab2_path = f"csi_drl_breakdown_{run_date}.json"
+
+    with open(tab1_path, "w") as f:
+        json.dump(results_tab1, f, indent=2, default=str)
+    with open(tab2_path, "w") as f:
+        json.dump(results_tab2, f, indent=2, default=str)
+
+    logger.info(f"   Saved: {tab1_path}")
+    logger.info(f"   Saved: {tab2_path}")
+
+    # ── Upload ─────────────────────────────────────────────────────────────────
+    if token:
+        logger.info("\n📤 Uploading results to HuggingFace...")
+        try:
+            api = HfApi(token=token)
+            for path in [tab1_path, tab2_path]:
+                api.upload_file(
+                    path_or_fileobj=path,
+                    path_in_repo=path,
+                    repo_id=config.RESULTS_REPO,
+                    token=token,
+                    repo_type="dataset"
+                )
+            logger.info("   ✅ Upload complete!")
+        except Exception as e:
+            logger.error(f"   Upload failed: {e}")
+
+    return {"tab1": results_tab1, "tab2": results_tab2}
+
+
+if __name__ == "__main__":
+    run_trainer()
