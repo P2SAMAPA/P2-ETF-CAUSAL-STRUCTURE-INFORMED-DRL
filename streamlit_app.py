@@ -29,6 +29,12 @@ st.markdown("""
             font-weight:700;color:white}
 .badge-hold{background:#f39c12;border-radius:6px;padding:2px 12px;font-size:0.75rem;
             font-weight:700;color:white}
+.badge-strongbuy{background:#1a7a2a;border-radius:6px;padding:2px 12px;font-size:0.75rem;
+                 font-weight:700;color:white}
+.badge-strongsell{background:#7a1a1a;border-radius:6px;padding:2px 12px;font-size:0.75rem;
+                  font-weight:700;color:white}
+.badge-reduce{background:#e67e22;border-radius:6px;padding:2px 12px;font-size:0.75rem;
+              font-weight:700;color:white}
 </style>
 """, unsafe_allow_html=True)
 
@@ -57,23 +63,17 @@ def next_trading_day() -> str:
         d += timedelta(days=1)
     return d.strftime("%B %d, %Y")
 
-def get_action(z_score: float) -> str:
-    if z_score > 1.0:
-        return "STRONG BUY"
-    elif z_score > 0.5:
-        return "BUY"
-    elif z_score > -0.5:
-        return "HOLD"
-    elif z_score > -1.0:
-        return "REDUCE"
-    else:
-        return "STRONG SELL"
-
 def action_badge(action: str) -> str:
-    if "BUY" in action:
+    if "STRONG BUY" in action:
+        return f'<span class="badge-strongbuy">🟢 {action}</span>'
+    elif "BUY" in action:
         return f'<span class="badge-buy">🟢 {action}</span>'
+    elif "STRONG SELL" in action:
+        return f'<span class="badge-strongsell">🔴 {action}</span>'
     elif "SELL" in action:
         return f'<span class="badge-sell">🔴 {action}</span>'
+    elif "REDUCE" in action:
+        return f'<span class="badge-reduce">🟠 {action}</span>'
     else:
         return f'<span class="badge-hold">🟡 {action}</span>'
 
@@ -84,6 +84,14 @@ def safe_float(val, default=0.0):
         return float(val)
     except (ValueError, TypeError):
         return default
+
+def get_action(z_score: float) -> str:
+    if z_score > 0.5:
+        return "BUY"
+    elif z_score > -0.5:
+        return "HOLD"
+    else:
+        return "SELL"
 
 
 @st.cache_data(ttl=3600)
@@ -185,7 +193,7 @@ with tab1:
 **Interpretation:**
 - **Higher z-score** → Stronger causal-structure-informed signal
 - **Causal Links** → Number of detected causal relationships
-- **Action Probabilities** → BUY/HOLD/SELL likelihood
+- **Action** → BUY/HOLD/SELL recommendation
         """)
 
     for universe_name in UNIVERSE_ORDER:
@@ -202,16 +210,16 @@ with tab1:
         buy_etfs = []
         for ticker, data in full_scores.items():
             z = safe_float(data.get("z_score", 0))
-            if z > 0.5:
-                buy_etfs.append((ticker, z, data))
+            action = data.get("action", "HOLD")
+            if "BUY" in action or z > 0.5:
+                buy_etfs.append((ticker, z, data, action))
 
         buy_etfs = sorted(buy_etfs, key=lambda x: x[1], reverse=True)
 
         if buy_etfs:
             cols = st.columns(3)
-            for idx, (ticker, z_score, data) in enumerate(buy_etfs[:3]):
+            for idx, (ticker, z_score, data, action) in enumerate(buy_etfs[:3]):
                 best_window = data.get("window", "N/A")
-                action = data.get("action", "HOLD")
                 causal_links = int(safe_float(data.get("causal_links", 0)))
 
                 with cols[idx]:
@@ -227,6 +235,37 @@ with tab1:
 """, unsafe_allow_html=True)
         else:
             st.info("No BUY signals in this universe")
+
+        # ── TOP SELLS ──────────────────────────────────────────────────────────
+        sell_etfs = []
+        for ticker, data in full_scores.items():
+            z = safe_float(data.get("z_score", 0))
+            action = data.get("action", "HOLD")
+            if "SELL" in action or z < -0.5:
+                sell_etfs.append((ticker, z, data, action))
+
+        sell_etfs = sorted(sell_etfs, key=lambda x: x[1])
+
+        if sell_etfs:
+            st.markdown("#### 🔴 Top Sells")
+            cols = st.columns(3)
+            for idx, (ticker, z_score, data, action) in enumerate(sell_etfs[:3]):
+                best_window = data.get("window", "N/A")
+                causal_links = int(safe_float(data.get("causal_links", 0)))
+
+                with cols[idx]:
+                    st.markdown(f"""
+<div class="hero-card" style="background:linear-gradient(135deg,#4a1a1a 0%,#6a2d2d 60%,#914040 100%);">
+  <div class="ticker">{ticker}</div>
+  <div class="score">z-score = {z_score:+.3f}</div>
+  <div class="score">{action_badge(action)}</div>
+  <div class="score">Causal Links = {causal_links}</div>
+  <div class="score">best window = {best_window}d</div>
+  <div class="next-day">📅 {ntd}</div>
+</div>
+""", unsafe_allow_html=True)
+        else:
+            st.info("No SELL signals in this universe")
 
         # ── FULL RANKING ──────────────────────────────────────────────────────
         with st.expander(f"📋 Full ranking — {label}"):
@@ -321,6 +360,13 @@ with tab2:
             st.divider()
             continue
 
+        # ── Get full_ranking and build action lookup ──────────────────────────
+        full_ranking = win_data.get("full_ranking", [])
+        action_lookup = {}
+        for row in full_ranking:
+            if len(row) >= 3:
+                action_lookup[row[0]] = row[2]
+
         # ── TOP BUYS ──────────────────────────────────────────────────────────
         top_buys = win_data.get("top_buys", [])
         if top_buys:
@@ -328,7 +374,8 @@ with tab2:
             for idx, etf in enumerate(top_buys[:3]):
                 ticker = etf["ticker"]
                 z_score = safe_float(etf.get("z_score", 0))
-                action = get_action(z_score)
+                # Use action from lookup
+                action = action_lookup.get(ticker, "HOLD")
 
                 with cols[idx]:
                     st.markdown(f"""
@@ -339,10 +386,12 @@ with tab2:
   <div class="next-day">window = {selected_win}d · 📅 {ntd}</div>
 </div>
 """, unsafe_allow_html=True)
+        else:
+            st.info("No BUY signals at this window")
 
-        # ── FULL RANKING ──────────────────────────────────────────────────────
+        # ── FULL RANKING TABLE ──────────────────────────────────────────────
         with st.expander(f"📋 Full ranking — {label} @ {selected_win}d"):
-            rows = win_data.get("full_ranking", [])
+            rows = full_ranking
             if rows:
                 df_win = pd.DataFrame(rows)
                 df_win.columns = ["ETF", "z-score", "Action"]
